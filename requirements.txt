@@ -7,3 +7,5 @@ httpx==0.25.2
 pydantic==2.5.2
 openai==1.76.0
 python-dotenv==1.0.1
+sentence-transformers==2.2.2
+pinecone-client==3.0.0
