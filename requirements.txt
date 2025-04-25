@@ -9,3 +9,5 @@ openai==1.76.0
 python-dotenv==1.0.1
 sentence-transformers==2.2.2
 pinecone-client==3.0.0
+fastapi==0.109.0
+uvicorn==0.25.0
