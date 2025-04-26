@@ -3,7 +3,7 @@ from unittest.mock import patch, Mock, MagicMock
 import time
 from typing import Dict, Any, List
 
-from src.scraper import Scraper, ScrapeConfig, VideoData, RequestError
+from src.scraper import Scraper, ScrapeConfig, VideoData, RequestError, ApifyClientError
 
 
 @pytest.fixture
@@ -52,25 +52,29 @@ class TestScraper:
     """Tests for the Scraper class."""
 
     def test_start_scrape_returns_job_id(self, mock_scraper, sample_config):
-        """Test that start_scrape returns a valid job ID."""
-        # Mock the httpx client post method
-        mock_response = Mock()
-        mock_response.json.return_value = {"data": {"id": "test_job_id"}}
-        mock_response.raise_for_status.return_value = None
+        """Test that start_scrape returns a valid job ID using Apify client."""
+        # Mock the task client and call method
+        mock_task_client = Mock()
+        mock_task_client.call.return_value = {"id": "test_job_id"}
 
-        with patch.object(mock_scraper._client, 'post', return_value=mock_response):
-            job_id = mock_scraper.start_scrape(sample_config)
+        # Mock the client.task() method to return our mock task client
+        mock_scraper._apify_client.task = Mock(return_value=mock_task_client)
 
-            # Assert job_id is a string and non-empty
-            assert isinstance(job_id, str)
-            assert job_id == "test_job_id"
+        # Call the method to test
+        job_id = mock_scraper.start_scrape(sample_config)
 
-            # Verify the post was called with correct URL and data
-            expected_url = f"https://api.apify.com/v2/actor-tasks/{mock_scraper.actor_task_id}/runs?token={mock_scraper.apify_token}"
-            mock_scraper._client.post.assert_called_once()
-            args, kwargs = mock_scraper._client.post.call_args
-            assert args[0] == expected_url
-            assert "json" in kwargs
+        # Assert job_id is a string and non-empty
+        assert isinstance(job_id, str)
+        assert job_id == "test_job_id"
+
+        # Verify the task client was called with correct parameters
+        mock_scraper._apify_client.task.assert_called_once_with(mock_scraper.actor_task_id)
+        mock_task_client.call.assert_called_once()
+
+        # Get the arguments passed to call()
+        args, kwargs = mock_task_client.call.call_args
+        assert "run_input" in kwargs
+        assert kwargs["run_input"] == sample_config.model_dump(by_alias=True)
 
     def test_start_scrape_with_webhook(self, mock_scraper, sample_config):
         """Test start_scrape with webhook URL."""
@@ -80,57 +84,63 @@ class TestScraper:
         mock_response.json.return_value = {"job_id": "webhook_job_id"}
         mock_response.raise_for_status.return_value = None
 
-        with patch.object(mock_scraper._client, 'post', return_value=mock_response):
+        with patch.object(mock_scraper._http_client, 'post', return_value=mock_response):
             job_id = mock_scraper.start_scrape(sample_config)
 
             assert job_id == "webhook_job_id"
-            mock_scraper._client.post.assert_called_once_with(
+            mock_scraper._http_client.post.assert_called_once_with(
                 mock_scraper.webhook_url,
                 json=sample_config.model_dump(by_alias=True)
             )
 
-    def test_get_result_polls_until_success(self, mock_scraper, sample_response_data):
-        """Test that get_result polls until job succeeds and returns proper data."""
-        # Create a sequence of mock responses for status checks
-        status_responses = [
-            # First call - job is running
-            Mock(
-                json=Mock(return_value={"data": {"status": "RUNNING", "id": "test_job_id"}}),
-                raise_for_status=Mock(return_value=None)
-            ),
-            # Second call - job is still running
-            Mock(
-                json=Mock(return_value={"data": {"status": "RUNNING", "id": "test_job_id"}}),
-                raise_for_status=Mock(return_value=None)
-            ),
-            # Third call - job succeeded
-            Mock(
-                json=Mock(return_value={"data": {"status": "SUCCEEDED", "id": "test_job_id"}}),
-                raise_for_status=Mock(return_value=None)
-            )
-        ]
+    def test_start_scrape_client_error(self, mock_scraper, sample_config):
+        """Test that start_scrape raises ApifyClientError on client failure."""
+        # Mock the task client to raise an exception
+        mock_task_client = Mock()
+        mock_task_client.call.side_effect = Exception("Client error")
 
-        # Mock for the dataset items response
-        items_response = Mock(
-            json=Mock(return_value=sample_response_data["items"]),
-            raise_for_status=Mock(return_value=None)
-        )
+        mock_scraper._apify_client.task = Mock(return_value=mock_task_client)
 
-        with patch.object(mock_scraper._client, 'get') as mock_get:
-            # Set up the mock to return different responses on subsequent calls
-            mock_get.side_effect = status_responses + [items_response]
+        # Check that ApifyClientError is raised
+        with pytest.raises(ApifyClientError):
+            mock_scraper.start_scrape(sample_config)
 
-            # Call the method to test
-            results = mock_scraper.get_result("test_job_id")
+    def test_get_result_with_apify_client(self, mock_scraper, sample_response_data):
+        """Test that get_result uses Apify client and returns proper data."""
+        # Mock the run client
+        mock_run_client = Mock()
 
-            # Check the results
-            assert len(results) == 2
-            assert all(isinstance(item, VideoData) for item in results)
-            assert results[0].url == "https://example.com/video1"
-            assert results[1].url == "https://example.com/video2"
+        # Mock the run client's wait_for_finish method
+        mock_run_client.wait_for_finish.return_value = {
+            "id": "test_run_id",
+            "status": "SUCCEEDED",
+            "defaultDatasetId": "test_dataset_id"
+        }
 
-            # Verify correct number of calls (3 status checks + 1 items fetch)
-            assert mock_get.call_count == 4
+        # Mock the dataset client
+        mock_dataset_client = Mock()
+        mock_dataset_client.list_items.return_value = {
+            "items": sample_response_data["items"]
+        }
+
+        # Set up the mock chain
+        mock_scraper._apify_client.run = Mock(return_value=mock_run_client)
+        mock_scraper._apify_client.dataset = Mock(return_value=mock_dataset_client)
+
+        # Call the method to test
+        results = mock_scraper.get_result("test_job_id")
+
+        # Check the results
+        assert len(results) == 2
+        assert all(isinstance(item, VideoData) for item in results)
+        assert results[0].url == "https://example.com/video1"
+        assert results[1].url == "https://example.com/video2"
+
+        # Verify correct methods were called
+        mock_scraper._apify_client.run.assert_called_once_with("test_job_id")
+        mock_run_client.wait_for_finish.assert_called_once_with(wait_secs=mock_scraper._timeout)
+        mock_scraper._apify_client.dataset.assert_called_once_with("test_dataset_id")
+        mock_dataset_client.list_items.assert_called_once()
 
     def test_get_result_with_webhook(self, mock_scraper, sample_response_data):
         """Test get_result with webhook response."""
@@ -150,7 +160,7 @@ class TestScraper:
             )
         ]
 
-        with patch.object(mock_scraper._client, 'get') as mock_get:
+        with patch.object(mock_scraper._http_client, 'get') as mock_get:
             mock_get.side_effect = status_responses
 
             results = mock_scraper.get_result("webhook_job_id")
@@ -164,21 +174,42 @@ class TestScraper:
             args, _ = mock_get.call_args_list[0]
             assert args[0] == "https://example.com/webhook/status/webhook_job_id"
 
-    def test_get_result_timeout(self, mock_scraper):
-        """Test that get_result raises TimeoutError when polling exceeds timeout."""
-        # Mock response that always returns "RUNNING" status
-        mock_response = Mock(
-            json=Mock(return_value={"data": {"status": "RUNNING"}}),
-            raise_for_status=Mock(return_value=None)
-        )
+    def test_get_result_timeout_with_apify_client(self, mock_scraper):
+        """Test that get_result raises TimeoutError when client times out."""
+        # Mock the run client
+        mock_run_client = Mock()
 
-        with patch.object(mock_scraper._client, 'get', return_value=mock_response):
-            # Set a very short timeout to speed up the test
-            mock_scraper._timeout = 2
+        # Make wait_for_finish raise TimeoutError
+        mock_run_client.wait_for_finish.side_effect = TimeoutError("Timed out")
 
-            # Check that TimeoutError is raised
-            with pytest.raises(TimeoutError):
-                mock_scraper.get_result("test_job_id")
+        # Set up the mock
+        mock_scraper._apify_client.run = Mock(return_value=mock_run_client)
+
+        # Check that TimeoutError is raised
+        with pytest.raises(TimeoutError):
+            mock_scraper.get_result("test_job_id")
+
+        # Verify correct methods were called
+        mock_scraper._apify_client.run.assert_called_once_with("test_job_id")
+        mock_run_client.wait_for_finish.assert_called_once_with(wait_secs=mock_scraper._timeout)
+
+    def test_get_result_failed_run(self, mock_scraper):
+        """Test that get_result raises ApifyClientError when run fails."""
+        # Mock the run client
+        mock_run_client = Mock()
+
+        # Mock a failed run
+        mock_run_client.wait_for_finish.return_value = {
+            "id": "test_run_id",
+            "status": "FAILED",
+        }
+
+        # Set up the mock
+        mock_scraper._apify_client.run = Mock(return_value=mock_run_client)
+
+        # Check that ApifyClientError is raised
+        with pytest.raises(ApifyClientError):
+            mock_scraper.get_result("test_job_id")
 
     def test_parse_result_validation_error(self, mock_scraper):
         """Test that _parse_result raises ValidationError on invalid data."""

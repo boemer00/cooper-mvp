@@ -1,7 +1,8 @@
-from typing import List, Dict, Any, Optional
-import time
+from typing import List, Dict, Any, Optional, Union
 from pydantic import BaseModel, Field, ValidationError
+import time
 import httpx
+from apify_client import ApifyClient
 
 # --- Models ---
 
@@ -23,6 +24,10 @@ class VideoData(BaseModel):
 
 class RequestError(Exception):
     """Raised when an HTTP request fails after retries."""
+
+
+class ApifyClientError(Exception):
+    """Raised when an error occurs in the Apify client."""
 
 
 # --- Scraper ---
@@ -50,7 +55,10 @@ class Scraper:
         self.webhook_url = webhook_url
         self._poll_interval = poll_interval
         self._timeout = timeout
-        self._client = httpx.Client(timeout=10)
+
+        # Initialize both clients for flexibility
+        self._http_client = httpx.Client(timeout=10)
+        self._apify_client = ApifyClient(token=apify_token)
 
     def start_scrape(self, config: ScrapeConfig) -> str:
         """
@@ -60,31 +68,34 @@ class Scraper:
         :return: Job ID string for tracking the scrape job
 
         - If webhook_url is set: POST to webhook with config.json(by_alias=True).
-        - Otherwise: POST to Apify actor endpoint:
-            https://api.apify.com/v2/actor-tasks/{actor_task_id}/runs?token={apify_token}
+        - Otherwise: Uses Apify client to start an Actor/Task run.
         """
         config_json = config.model_dump(by_alias=True)
 
         try:
             if self.webhook_url:
-                # Use webhook URL if provided
-                response = self._client.post(self.webhook_url, json=config_json)
+                # Use webhook URL if provided (keep existing functionality)
+                response = self._http_client.post(self.webhook_url, json=config_json)
                 response.raise_for_status()
                 data = response.json()
                 return data.get("job_id")
             else:
-                # Use Apify API directly
-                url = f"https://api.apify.com/v2/actor-tasks/{self.actor_task_id}/runs?token={self.apify_token}"
-                response = self._client.post(url, json=config_json)
-                response.raise_for_status()
-                data = response.json()
-                return data.get("data", {}).get("id")
+                # Use Apify client to start the task
+                task_client = self._apify_client.task(self.actor_task_id)
+                run = task_client.call(run_input=config_json)
+
+                if not run:
+                    raise ApifyClientError("Failed to start task, no run data returned")
+
+                return run.get("id")
         except httpx.HTTPError as e:
             raise RequestError(f"Failed to start scrape job: {str(e)}") from e
+        except Exception as e:
+            raise ApifyClientError(f"Failed to start scrape job: {str(e)}") from e
 
     def get_result(self, job_id: str) -> List[VideoData]:
         """
-        Poll until the job completes or timeout expires.
+        Wait for the job to complete and retrieve results.
 
         :param job_id: Job ID returned from start_scrape
         :return: List of VideoData objects containing scrape results
@@ -92,36 +103,59 @@ class Scraper:
         Raises:
             TimeoutError: if not completed within self._timeout.
             RequestError: on repeated HTTP failures.
+            ApifyClientError: on Apify client failures.
             ValidationError: if returned data doesn't match VideoData schema.
         """
         start_time = time.time()
 
-        while (time.time() - start_time) < self._timeout:
-            try:
-                status_data = self._check_status(job_id)
-
-                # Handle webhook response
-                if self.webhook_url:
+        if self.webhook_url:
+            # Use existing webhook polling logic
+            while (time.time() - start_time) < self._timeout:
+                try:
+                    status_data = self._check_status(job_id)
                     status = status_data.get("status")
+
                     if status == "completed":
                         return self._parse_result(status_data)
-                # Handle Apify response
-                else:
-                    status = status_data.get("data", {}).get("status")
-                    if status == "SUCCEEDED":
-                        # Fetch the output items from the default dataset
-                        run_id = status_data.get("data", {}).get("id")
-                        dataset_url = f"https://api.apify.com/v2/actor-runs/{run_id}/dataset/items?token={self.apify_token}"
-                        response = self._client.get(dataset_url)
-                        response.raise_for_status()
-                        return self._parse_result({"items": response.json()})
 
-                # Wait before checking again
-                time.sleep(self._poll_interval)
-            except httpx.HTTPError as e:
-                # Retry on HTTP errors
-                time.sleep(self._poll_interval)
-                continue
+                    # Wait before checking again
+                    time.sleep(self._poll_interval)
+                except httpx.HTTPError as e:
+                    # Retry on HTTP errors
+                    time.sleep(self._poll_interval)
+                    continue
+        else:
+            # Use Apify client
+            try:
+                # Get the run client
+                run_client = self._apify_client.run(job_id)
+
+                # Wait for the run to finish with timeout
+                run = run_client.wait_for_finish(wait_secs=self._timeout)
+
+                if not run:
+                    raise ApifyClientError(f"Failed to get run data for job {job_id}")
+
+                if run.get("status") == "SUCCEEDED":
+                    # Get dataset items
+                    dataset_id = run.get("defaultDatasetId")
+                    if not dataset_id:
+                        raise ApifyClientError("No default dataset found in the run")
+
+                    dataset_client = self._apify_client.dataset(dataset_id)
+                    dataset_items = dataset_client.list_items().get("items", [])
+
+                    return self._parse_result({"items": dataset_items})
+                else:
+                    # Run did not succeed
+                    status = run.get("status", "UNKNOWN")
+                    raise ApifyClientError(f"Run failed with status: {status}")
+            except TimeoutError:
+                # Re-raise timeout error
+                raise
+            except Exception as e:
+                # Handle other exceptions
+                raise ApifyClientError(f"Error retrieving run results: {str(e)}") from e
 
         # If we get here, we've timed out
         raise TimeoutError(f"Scrape job {job_id} did not complete within {self._timeout} seconds")
@@ -135,21 +169,28 @@ class Scraper:
 
         Raises:
             RequestError: On HTTP request failures
+            ApifyClientError: On Apify client failures
         """
         try:
             if self.webhook_url:
-                # Check status via webhook
+                # Check status via webhook (keep existing functionality)
                 status_url = f"{self.webhook_url}/status/{job_id}"
-                response = self._client.get(status_url)
+                response = self._http_client.get(status_url)
+                response.raise_for_status()
+                return response.json()
             else:
-                # Check status via Apify API
-                status_url = f"https://api.apify.com/v2/actor-runs/{job_id}?token={self.apify_token}"
-                response = self._client.get(status_url)
+                # Use Apify client to check run status
+                run_client = self._apify_client.run(job_id)
+                run_info = run_client.get()
 
-            response.raise_for_status()
-            return response.json()
+                if not run_info:
+                    raise ApifyClientError(f"Failed to get status for job {job_id}")
+
+                return {"data": run_info}
         except httpx.HTTPError as e:
             raise RequestError(f"Failed to check job status: {str(e)}") from e
+        except Exception as e:
+            raise ApifyClientError(f"Failed to check job status: {str(e)}") from e
 
     def _parse_result(self, raw_data: Dict[str, Any]) -> List[VideoData]:
         """
