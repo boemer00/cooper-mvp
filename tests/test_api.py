@@ -114,7 +114,103 @@ def test_chat_endpoint_success(monkeypatch):
     }
 
     # Verify only the VideoFinder was called with expected parameters
-    mock_video_finder.get_videos.assert_called_once_with("cooking")
+    mock_video_finder.get_videos.assert_called_once_with("cooking", direct_url=None)
+
+def test_chat_endpoint_direct_url(monkeypatch):
+    # Test data for direct URL
+    direct_tiktok_url = "https://www.tiktok.com/@username/video/1234567890"
+    test_videos = [direct_tiktok_url]
+    test_video_data = [
+        VideoData(
+            url=direct_tiktok_url,
+            title="Direct TikTok Video",
+            transcript="This is a direct TikTok video test",
+            audio_features={"pitch": 0.6, "tempo": 0.7},
+            metadata={"likes": 500, "views": 5000},
+            comments=["Great!", "Love it"]
+        )
+    ]
+    test_text_emotions = {"joy": 0.7, "sadness": 0.1}
+    test_audio_emotions = {"joy": 0.6, "sadness": 0.2}
+    test_correlations = {"joy_vs_likes": 0.8}
+    test_insights = ["Direct URL Insight"]
+    test_pr_hooks = ["Direct URL PR Hook"]
+
+    # Mock VideoFinder
+    mock_video_finder = MagicMock()
+    mock_video_finder.get_videos.return_value = test_videos
+    monkeypatch.setattr("src.app.VideoFinder", lambda: mock_video_finder)
+
+    # Create scraper mock
+    class MockScraper:
+        def start_scrape(self, config):
+            assert isinstance(config, ScrapeConfig)
+            assert config.postURLs == test_videos
+            return "mock_job_id"
+
+        def get_result(self):
+            return test_video_data
+
+    monkeypatch.setattr("src.app.Scraper", MockScraper)
+
+    # Mock other analyzers
+    mock_text_analyzer = MagicMock()
+    mock_text_analyzer.analyze.return_value = test_text_emotions
+    monkeypatch.setattr("src.app.TextEmotionAnalyzer", lambda: mock_text_analyzer)
+
+    mock_audio_analyzer = MagicMock()
+    mock_audio_analyzer.analyze.return_value = test_audio_emotions
+    monkeypatch.setattr("src.app.AudioEmotionAnalyzer", lambda: mock_audio_analyzer)
+
+    mock_correlator = MagicMock()
+    mock_correlator.compute.return_value = test_correlations
+    monkeypatch.setattr("src.app.Correlator", lambda: mock_correlator)
+
+    mock_insight_generator = MagicMock()
+    mock_insight_generator.generate.return_value = test_insights
+    mock_insight_generator.suggest_pr_hooks.return_value = test_pr_hooks
+    monkeypatch.setattr("src.app.InsightGenerator", lambda: mock_insight_generator)
+
+    # Make request with direct URL
+    response = client.get("/chat", params={
+        "query": "any_topic",
+        "limit": 1,
+        "url": direct_tiktok_url
+    })
+
+    # Assertions
+    assert response.status_code == 200
+    json_response = response.json()
+
+    assert json_response == {
+        "videos": test_videos,
+        "emotions": {
+            "text": test_text_emotions,
+            "audio": test_audio_emotions
+        },
+        "correlations": test_correlations,
+        "insights": test_insights,
+        "pr_hooks": test_pr_hooks
+    }
+
+    # Verify VideoFinder was called with expected parameters
+    mock_video_finder.get_videos.assert_called_once_with("any_topic", direct_url=direct_tiktok_url)
+
+def test_chat_endpoint_invalid_direct_url(monkeypatch):
+    # Mock VideoFinder to validate and reject invalid URL
+    mock_video_finder = MagicMock()
+    mock_video_finder.get_videos.return_value = []
+    monkeypatch.setattr("src.app.VideoFinder", lambda: mock_video_finder)
+
+    invalid_url = "https://example.com/not-a-tiktok-url"
+    response = client.get("/chat", params={
+        "query": "any_topic",
+        "url": invalid_url
+    })
+
+    assert response.status_code == 404
+    assert "No videos found" in response.json()["detail"]
+    mock_video_finder.get_videos.assert_called_once_with("any_topic", direct_url=invalid_url)
 
 def test_chat_endpoint_missing_query():
     response = client.get("/chat")
