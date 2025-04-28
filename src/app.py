@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import List, Dict, Optional
 from fastapi import FastAPI, Query, HTTPException
 from pydantic import BaseModel
 from src.video_finder import VideoFinder
@@ -21,17 +21,20 @@ class ChatResponse(BaseModel):
 def chat_endpoint(
     query: str = Query(..., description="Topic to analyze"),
     limit: int = Query(10, ge=1, le=20),
+    url: Optional[str] = Query(None, description="Direct TikTok URL to analyze"),
 ) -> ChatResponse:
     """
     Orchestrates the full Cooper pipeline:
     VideoFinder → Scraper → EmotionAnalyzers → Correlator → InsightGenerator
+
+    Supports either topic-based search or direct TikTok URL analysis.
     """
-    # Step 1: Find videos based on query
+    # Step 1: Find videos based on query or direct URL
     video_finder = VideoFinder()
-    video_urls = video_finder.get_videos(query)[:limit]
+    video_urls = video_finder.get_videos(query, direct_url=url)[:limit]
 
     if not video_urls:
-        raise HTTPException(status_code=404, detail="No videos found for query")
+        raise HTTPException(status_code=404, detail="No videos found for query or invalid TikTok URL")
 
     # Step 2: Scrape video data
     try:

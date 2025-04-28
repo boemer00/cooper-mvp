@@ -6,6 +6,7 @@ A powerful API for analyzing video content, emotions, and generating insights fr
 
 Cooper API is a comprehensive video content analysis tool that:
 - Finds relevant videos based on your query
+- Processes direct TikTok URLs for immediate analysis
 - Scrapes video data including comments
 - Analyzes emotions in text and audio
 - Computes correlations between various factors
@@ -47,14 +48,24 @@ uvicorn src.app:app --reload
 
 #### Using cURL
 ```bash
+# Query-based search
 curl -X 'GET' \
   'http://127.0.0.1:8000/chat?query=sustainable%20fashion&limit=5' \
+  -H 'accept: application/json'
+
+# Direct TikTok URL
+curl -X 'GET' \
+  'http://127.0.0.1:8000/chat?query=any_topic&url=https://www.tiktok.com/@username/video/1234567890' \
   -H 'accept: application/json'
 ```
 
 #### Using HTTPie
 ```bash
+# Query-based search
 http GET http://127.0.0.1:8000/chat query==sustainable%20fashion limit==5
+
+# Direct TikTok URL
+http GET http://127.0.0.1:8000/chat query==any_topic url==https://www.tiktok.com/@username/video/1234567890
 ```
 
 ## Architecture

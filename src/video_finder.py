@@ -1,4 +1,5 @@
-from typing import List, Dict
+from typing import List, Dict, Optional
+import re
 
 
 class VideoFinder:
@@ -33,14 +34,35 @@ class VideoFinder:
             ]
         }
 
-    def get_videos(self, topic: str) -> List[str]:
+    def is_valid_tiktok_url(self, url: str) -> bool:
+        """
+        Validate if a URL is a proper TikTok video URL.
+
+        Args:
+            url: URL string to validate
+
+        Returns:
+            bool: True if valid TikTok URL, False otherwise
+        """
+        # Pattern for TikTok URLs (www.tiktok.com or vm.tiktok.com followed by path)
+        pattern = r'^https?://(www|vm)\.tiktok\.com/[@a-zA-Z0-9_\-./]+$'
+        return bool(re.match(pattern, url))
+
+    def get_videos(self, topic: str, direct_url: Optional[str] = None) -> List[str]:
         """
         Given a topic, return exactly 10 hardcoded TikTok URLs or [] if unknown.
+        If a direct URL is provided, validate and return it as a single-item list.
 
         Args:
             topic: A string representing the topic of interest
+            direct_url: Optional direct TikTok URL to process
 
         Returns:
-            A list of 10 TikTok video URLs for known topics, or an empty list for unknown topics
+            A list of TikTok video URLs
         """
+        if direct_url:
+            if self.is_valid_tiktok_url(direct_url):
+                return [direct_url]
+            return []
+
         return self._video_mapping.get(topic, [])
